@@ -13,6 +13,7 @@ import signal
 import sys
 import os
 from dotenv import load_dotenv
+from urllib.parse import urlparse, quote
 
 # Load environment variables
 load_dotenv()
@@ -52,6 +53,77 @@ def signal_handler(signum, frame):
 # Register signal handler
 signal.signal(signal.SIGINT, signal_handler)
 
+
+def sanitize_error_message(error_msg):
+    """Remove sensitive information from error messages"""
+    error_str = str(error_msg)[:500]  # Limit length
+    # Remove potential API keys, tokens, etc.
+    patterns = [
+        r'(api[_-]?key|token|bearer|authorization|password|secret)[^\s]*',
+        r'Bearer\s+[^\s]+',
+        r'https?://[^\s]*@[^\s]+',  # URLs with credentials
+        r'[a-zA-Z0-9+/]{40,}',  # Long base64 strings that might be keys
+    ]
+    for pattern in patterns:
+        error_str = re.sub(pattern, '[REDACTED]', error_str, flags=re.IGNORECASE)
+    return error_str
+
+
+def validate_url(url):
+    """Validate URL for security before passing to MCP client."""
+    # Check if URL is a string
+    if not isinstance(url, str):
+        raise ValueError("URL must be a string")
+    
+    # Parse the URL
+    try:
+        parsed = urlparse(url)
+    except Exception as e:
+        raise ValueError(f"Invalid URL format: {e}")
+    
+    # Only allow HTTP/HTTPS protocols
+    if parsed.scheme not in ['http', 'https']:
+        raise ValueError(f"Invalid protocol: {parsed.scheme}. Only HTTP/HTTPS allowed")
+    
+    # Reject URLs with potentially dangerous characters
+    dangerous_chars = ['\n', '\r', '\x00', '<', '>', '"', '{', '}', '|', '\\', '^', '`']
+    for char in dangerous_chars:
+        if char in url:
+            raise ValueError(f"URL contains dangerous character: {char}")
+    
+    # Reject javascript: and data: URLs disguised as HTTP
+    if 'javascript:' in url.lower() or 'data:' in url.lower():
+        raise ValueError("JavaScript and data URLs are not allowed")
+    
+    # Ensure hostname exists
+    if not parsed.netloc:
+        raise ValueError("URL must have a valid hostname")
+    
+    # Limit URL length to prevent buffer overflow attacks
+    if len(url) > 2048:
+        raise ValueError("URL too long (max 2048 characters)")
+    
+    return True
+
+
+def sanitize_search_query(query):
+    """Sanitize search query for safe URL construction."""
+    # Remove any URL encoding attempts
+    query = query.replace('%', '')
+    
+    # Remove dangerous characters
+    safe_query = re.sub(r'[^\w\s\-_.,]', ' ', query)
+    
+    # Collapse multiple spaces
+    safe_query = re.sub(r'\s+', ' ', safe_query).strip()
+    
+    # Limit length
+    if len(safe_query) > 200:
+        safe_query = safe_query[:200]
+    
+    # URL encode the safe query
+    return quote(safe_query)
+
 async def setup_mcp_client():
     """Setup MCP client with Playwright server"""
     global mcp_client
@@ -67,7 +139,7 @@ async def setup_mcp_client():
             # No need to call connect() - client connects automatically
             print("MCP Playwright client initialized")
         except Exception as e:
-            print(f"Failed to setup MCP client: {e}")
+            print(f"Failed to setup MCP client: {sanitize_error_message(e)}")
             mcp_client = None
     return mcp_client
 
@@ -138,8 +210,20 @@ def identify_main_concepts(state: AcademicNoteState) -> AcademicNoteState:
         state["main_concepts"] = concepts[:7]
         
     except Exception as e:
-        print(f"Error identifying concepts: {e}")
-        state["main_concepts"] = ["machine learning", "neural networks"]
+        error_msg = sanitize_error_message(e)
+        print(f"Error identifying concepts: {error_msg}")
+        
+        # Provide more helpful error messages for common issues
+        if "connection" in str(e).lower() or "timed out" in str(e).lower():
+            print("\n⚠️  Connection Issue Detected:")
+            print("   1. Check that BASE_URL and API_KEY are set in .env file")
+            print("   2. Verify the AI service is running and accessible")
+            print("   3. Check your internet connection")
+            print(f"   4. Current BASE_URL: {BASE_URL[:30]}..." if BASE_URL else "   4. BASE_URL not set!")
+            print(f"   5. API_KEY is {'set' if API_KEY else 'NOT set'}")
+        
+        # Return empty concepts to continue processing
+        state["main_concepts"] = []
     
     return state
 
@@ -181,7 +265,7 @@ async def search_academic_sources(state: AcademicNoteState) -> AcademicNoteState
                     print(f"  Warning: Could not install browser: {e}")
                     
         except Exception as e:
-            print(f"  Error getting tools from MCP: {e}")
+            print(f"  Error getting tools from MCP: {sanitize_error_message(e)}")
             state["web_search_results"] = {}
             return state
         
@@ -215,11 +299,25 @@ async def search_academic_sources(state: AcademicNoteState) -> AcademicNoteState
                 if navigate_tool and snapshot_tool:
                     print(f"    Using tools: {navigate_tool.name} and {snapshot_tool.name}")
                     
+                    # Sanitize concept for URL construction
+                    safe_concept = sanitize_search_query(concept)
+                    
                     # Search Google Scholar
-                    scholar_url = f"https://scholar.google.com/scholar?q={concept.replace(' ', '+')}"
+                    scholar_url = f"https://scholar.google.com/scholar?q={safe_concept}"
+                    
+                    # Validate URL before using
+                    try:
+                        validate_url(scholar_url)
+                    except ValueError as e:
+                        print(f"    Invalid URL for Google Scholar: {e}")
+                        continue
                     
                     # Navigate to Google Scholar
-                    nav_result = await navigate_tool.ainvoke({"url": scholar_url})
+                    try:
+                        nav_result = await navigate_tool.ainvoke({"url": scholar_url})
+                    except Exception as e:
+                        print(f"    Failed to navigate to Google Scholar: {sanitize_error_message(e)}")
+                        nav_result = None
                     
                     # Get page snapshot
                     snapshot_result = await snapshot_tool.ainvoke({})
@@ -233,8 +331,22 @@ async def search_academic_sources(state: AcademicNoteState) -> AcademicNoteState
                     ]
                     
                     # Search arXiv
-                    arxiv_url = f"https://arxiv.org/search/?query={concept.replace(' ', '+')}&searchtype=all"
-                    nav_result = await navigate_tool.ainvoke({"url": arxiv_url})
+                    arxiv_url = f"https://arxiv.org/search/?query={safe_concept}&searchtype=all"
+                    
+                    # Validate URL before using
+                    try:
+                        validate_url(arxiv_url)
+                    except ValueError as e:
+                        print(f"    Invalid URL for arXiv: {e}")
+                        concept_results["arxiv_results"] = []
+                        results[concept] = concept_results
+                        continue
+                    
+                    try:
+                        nav_result = await navigate_tool.ainvoke({"url": arxiv_url})
+                    except Exception as e:
+                        print(f"    Failed to navigate to arXiv: {sanitize_error_message(e)}")
+                        nav_result = None
                     snapshot_result = await snapshot_tool.ainvoke({})
                     
                     concept_results["arxiv_results"] = [
@@ -251,7 +363,7 @@ async def search_academic_sources(state: AcademicNoteState) -> AcademicNoteState
                     concept_results["status"] = "MCP tools not available - using placeholder"
                     
             except Exception as e:
-                print(f"    Error searching for {concept}: {e}")
+                print(f"    Error searching for {concept}: {sanitize_error_message(e)}")
                 concept_results["error"] = str(e)
             
             search_results[concept] = concept_results
@@ -260,7 +372,7 @@ async def search_academic_sources(state: AcademicNoteState) -> AcademicNoteState
         print(f"  Completed web search for {len(search_results)} concepts")
         
     except Exception as e:
-        print(f"Error in web search: {e}")
+        print(f"Error in web search: {sanitize_error_message(e)}")
         state["web_search_results"] = {}
     
     return state
@@ -334,7 +446,7 @@ def perform_deep_research(state: AcademicNoteState) -> AcademicNoteState:
             }
             
         except Exception as e:
-            print(f"Error researching {concept}: {e}")
+            print(f"Error researching {concept}: {sanitize_error_message(e)}")
             research_results[concept] = {
                 "content": f"Deep research needed for {concept} - Error in processing",
                 "timestamp": datetime.now().isoformat(),
@@ -407,7 +519,7 @@ def fact_check_and_correct(state: AcademicNoteState) -> AcademicNoteState:
         state["fact_checks"] = [{"corrections": corrections, "timestamp": datetime.now().isoformat()}]
         
     except Exception as e:
-        print(f"Error fact-checking: {e}")
+        print(f"Error fact-checking: {sanitize_error_message(e)}")
         state["corrected_explanations"] = state["transcript_content"]
         state["fact_checks"] = [{"corrections": "Error in fact-checking process."}]
     
@@ -497,7 +609,7 @@ def find_academic_references(state: AcademicNoteState) -> AcademicNoteState:
         print(f"  Found {len(references)} academic references")
         
     except Exception as e:
-        print(f"Error finding references: {e}")
+        print(f"Error finding references: {sanitize_error_message(e)}")
         state["academic_references"] = [{
             "type": "error",
             "citation": f"Error finding academic references: {str(e)}",
@@ -628,7 +740,7 @@ def generate_obsidian_note(state: AcademicNoteState) -> AcademicNoteState:
         print(f"  Generated comprehensive note with {len(obsidian_links)} Obsidian links")
         
     except Exception as e:
-        print(f"Error generating note: {e}")
+        print(f"Error generating note: {sanitize_error_message(e)}")
         state["final_note"] = f"# {state['title']}\n\nError generating comprehensive academic note: {str(e)}"
         state["obsidian_links"] = []
     
@@ -708,8 +820,24 @@ async def process_transcript_to_academic_note_async(transcript_path: str, output
         return final_state
         
     except Exception as e:
-        print(f"Error processing transcript: {e}")
+        print(f"Error processing transcript: {sanitize_error_message(e)}")
         return None
+
+def test_llm_connection():
+    """Test connection to LLM service"""
+    try:
+        client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": "test"}],
+            max_tokens=10
+        )
+        return True
+    except Exception as e:
+        print(f"\n❌ Failed to connect to LLM service: {sanitize_error_message(e)}")
+        print(f"   BASE_URL: {BASE_URL}")
+        print(f"   Make sure the service is running and accessible")
+        return False
 
 def process_transcript_to_academic_note(transcript_path: str, output_dir: str = "knowledge_base"):
     """Sync wrapper for transcript processing with MCP integration"""
@@ -717,6 +845,13 @@ def process_transcript_to_academic_note(transcript_path: str, output_dir: str = 
 
 def batch_process_transcripts(transcripts_dir: str = "transcripts", output_dir: str = "knowledge_base"):
     """Process all transcript files in a directory including subtitles"""
+    # Test LLM connection before processing
+    print("Testing connection to LLM service...")
+    if not test_llm_connection():
+        print("\n❌ Cannot proceed without LLM connection. Please check your configuration.")
+        return
+    print("✅ LLM connection successful!\n")
+    
     transcript_files = []
     
     # Find all markdown files in transcripts directory (including subtitles)
@@ -760,6 +895,19 @@ if __name__ == "__main__":
             batch_process_transcripts()
         else:
             transcript_file = sys.argv[1]
+            # Validate the file path before processing
+            if not os.path.exists(transcript_file):
+                print(f"Error: File not found: {transcript_file}")
+                sys.exit(1)
+            if not transcript_file.endswith('.md'):
+                print(f"Error: Expected .md file, got: {transcript_file}")
+                sys.exit(1)
+            # Ensure file is within allowed directories
+            abs_path = os.path.abspath(transcript_file)
+            allowed_dirs = [os.path.abspath('transcripts'), os.path.abspath('.')]
+            if not any(abs_path.startswith(d + os.sep) or abs_path == d for d in allowed_dirs):
+                print(f"Error: File must be in transcripts directory or current directory")
+                sys.exit(1)
             process_transcript_to_academic_note(transcript_file)
     else:
         # Process a single file for testing

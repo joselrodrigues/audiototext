@@ -28,21 +28,71 @@ if not BASE_URL or not API_KEY:
     print("Error: Please set BASE_URL and API_KEY in your .env file")
     exit(1)
 
+def secure_path_join(base_dir, *paths):
+    """Safely join paths ensuring the result stays within base_dir."""
+    # Get absolute base directory
+    base_dir = os.path.abspath(base_dir)
+    
+    # Join the paths
+    requested_path = os.path.join(base_dir, *paths)
+    
+    # Resolve to absolute path (handles .. and symlinks)
+    requested_path = os.path.abspath(requested_path)
+    
+    # Ensure the resolved path is within base_dir
+    if not requested_path.startswith(base_dir + os.sep) and requested_path != base_dir:
+        raise ValueError(f"Path traversal attempt detected: {requested_path}")
+    
+    return requested_path
+
+
+def validate_path_component(component):
+    """Validate individual path components."""
+    # Reject dangerous patterns
+    dangerous_patterns = ['..', '/', '\\', '\x00', '~']
+    for pattern in dangerous_patterns:
+        if pattern in component:
+            raise ValueError(f"Invalid path component: {component}")
+    
+    # Additional validation for Windows
+    if os.name == 'nt':
+        # Check for Windows reserved names
+        reserved = ['CON', 'PRN', 'AUX', 'NUL', 'COM1', 'LPT1']
+        if component.upper().split('.')[0] in reserved:
+            raise ValueError(f"Reserved filename: {component}")
+    
+    return True
+
+
 def sanitize_filename(filename):
-    """Replace spaces and special characters with hyphens, convert to lowercase"""
+    """Sanitize filename for security and compatibility."""
+    # First validate it doesn't contain path traversal
+    if '..' in filename or '/' in filename or '\\' in filename:
+        raise ValueError(f"Invalid filename: {filename}")
+    
     # Remove file extension for folder name
     name = os.path.splitext(filename)[0]
+    
     # Convert to lowercase
     name = name.lower()
-    # Replace spaces and special characters with hyphens
-    # Keep only alphanumeric, hyphens, and underscores
-    sanitized = re.sub(r'[^\w\s-]', '', name)
-    # Replace spaces with hyphens
-    sanitized = re.sub(r'[\s]+', '-', sanitized)
+    
+    # Keep only safe characters
+    sanitized = re.sub(r'[^a-z0-9_-]', '-', name)
+    
     # Remove multiple consecutive hyphens
     sanitized = re.sub(r'-+', '-', sanitized)
+    
     # Remove leading/trailing hyphens
     sanitized = sanitized.strip('-')
+    
+    # Ensure non-empty
+    if not sanitized:
+        sanitized = 'unnamed'
+    
+    # Limit length
+    if len(sanitized) > 100:
+        sanitized = sanitized[:100]
+    
     return sanitized
 
 
@@ -55,8 +105,12 @@ def find_srt_file(video_path):
     try:
         for file in os.listdir(video_dir):
             if file.lower().startswith(video_name.lower()) and file.lower().endswith('.srt'):
-                return os.path.join(video_dir, file)
-    except OSError:
+                # Use secure path join
+                srt_path = secure_path_join(video_dir, file)
+                # Validate it's within allowed directory
+                if os.path.abspath(srt_path).startswith(os.path.abspath(INPUT_FOLDER) + os.sep):
+                    return srt_path
+    except (OSError, ValueError):
         pass
     
     return None
@@ -89,6 +143,25 @@ def create_folder_structure():
     print(f"✓ Folder structure ready: {', '.join(folders)}")
 
 
+def validate_input_file(file_path, base_dir):
+    """Validate that input file is safe to process."""
+    try:
+        # Ensure file is within allowed directory
+        abs_path = os.path.abspath(file_path)
+        abs_base = os.path.abspath(base_dir)
+        
+        if not abs_path.startswith(abs_base + os.sep):
+            raise ValueError(f"File outside allowed directory: {file_path}")
+        
+        # Check file exists and is a regular file
+        if not os.path.isfile(abs_path):
+            raise ValueError(f"Not a valid file: {file_path}")
+        
+        return True
+    except Exception as e:
+        raise ValueError(f"Invalid file path: {e}")
+
+
 def get_video_files():
     """Get all video files from input folder, maintaining directory structure"""
     video_files = []
@@ -99,10 +172,14 @@ def get_video_files():
             # Check if file has supported video extension
             file_ext = os.path.splitext(file)[1].lower()
             if file_ext in [ext.lower() for ext in SUPPORTED_VIDEO_FORMATS]:
-                full_path = os.path.join(root, file)
-                # Get relative path from input folder
-                rel_path = os.path.relpath(full_path, INPUT_FOLDER)
-                video_files.append(full_path)
+                try:
+                    full_path = secure_path_join(root, file)
+                    # Validate the file
+                    validate_input_file(full_path, INPUT_FOLDER)
+                    video_files.append(full_path)
+                except ValueError as e:
+                    print(f"Skipping invalid file: {e}")
+                    continue
     
     return sorted(video_files)
 
@@ -126,7 +203,7 @@ def chunk_audio(audio_file, output_dir, max_size_mb=MAX_CHUNK_SIZE_MB):
     for i in range(0, total_duration, chunk_length_ms):
         chunk = audio[i:i + chunk_length_ms]
         chunk_num = i // chunk_length_ms
-        chunk_filename = os.path.join(output_dir, f"chunk_{chunk_num:03d}.wav")
+        chunk_filename = secure_path_join(output_dir, f"chunk_{chunk_num:03d}.wav")
         chunk.export(chunk_filename, format="wav")
         chunk_size = os.path.getsize(chunk_filename) / (1024 * 1024)
         chunks.append(chunk_filename)
@@ -144,10 +221,14 @@ def transcribe_chunk_with_requests(chunk_file):
         files = {"file": (os.path.basename(chunk_file), audio, "audio/wav")}
         data = {"model": "whisper", "response_format": "text"}
         
-        response = requests.post(url, headers=headers, files=files, data=data)
+        response = requests.post(url, headers=headers, files=files, data=data, timeout=300)
         
     if response.status_code == 200:
-        result = response.json()
+        try:
+            result = response.json()
+        except json.JSONDecodeError:
+            print("Error: Invalid JSON response from API")
+            return {"text": "", "language": "unknown"}
         if isinstance(result, dict):
             return {
                 'text': result.get('text', ''),
@@ -155,14 +236,18 @@ def transcribe_chunk_with_requests(chunk_file):
             }
         return {'text': str(result), 'language': 'unknown'}
     else:
-        raise Exception(f"API error {response.status_code}: {response.text}")
+        # Sanitize error output to prevent credential leakage
+        error_msg = response.text[:200] if response.text else "No error message"
+        # Remove any potential API keys or sensitive data from error
+        error_msg = re.sub(r'(api[_-]?key|token|bearer|authorization)[^\s]*', '[REDACTED]', error_msg, flags=re.IGNORECASE)
+        raise Exception(f"API error {response.status_code}: {error_msg}")
 
 
 def transcribe_chunks(chunks, video_name):
     """Transcribe each chunk and combine results"""
     transcriptions = []
     detected_languages = []
-    partial_file = os.path.join(TRANSCRIPTS_FOLDER, f"{video_name}_partial.md")
+    partial_file = secure_path_join(TRANSCRIPTS_FOLDER, f"{sanitize_filename(video_name)}_partial.md")
     
     # Save progress every N chunks
     save_frequency = 10
@@ -225,21 +310,25 @@ def process_video(video_path):
         sanitized_dir_parts = []
         for part in rel_dir.split(os.sep):
             sanitized_dir_parts.append(sanitize_filename(part + '.tmp').replace('.tmp', ''))
+        # Validate each part before joining
+        for part in sanitized_dir_parts:
+            validate_path_component(part)
+        
         sanitized_rel_dir = os.path.join(*sanitized_dir_parts)
         
-        audio_output_base = os.path.join(OUTPUT_FOLDER, sanitized_rel_dir)
-        transcript_output_base = os.path.join(TRANSCRIPTS_FOLDER, sanitized_rel_dir)
+        audio_output_base = secure_path_join(OUTPUT_FOLDER, sanitized_rel_dir)
+        transcript_output_base = secure_path_join(TRANSCRIPTS_FOLDER, sanitized_rel_dir)
     else:
         audio_output_base = OUTPUT_FOLDER
         transcript_output_base = TRANSCRIPTS_FOLDER
     
     # Create directories
-    audio_output_dir = os.path.join(audio_output_base, sanitized_name)
+    audio_output_dir = secure_path_join(audio_output_base, sanitized_name)
     Path(audio_output_dir).mkdir(parents=True, exist_ok=True)
     Path(transcript_output_base).mkdir(parents=True, exist_ok=True)
     
     # Convert video to audio
-    audio_file = os.path.join(audio_output_dir, f"{sanitized_name}.wav")
+    audio_file = secure_path_join(audio_output_dir, f"{sanitized_name}.wav")
     
     if not os.path.exists(audio_file):
         print("  Converting video to audio...")
@@ -280,7 +369,7 @@ def process_video(video_path):
         print(f"  Detected language: {detected_language}")
     
     # Save transcription maintaining directory structure
-    transcript_file = os.path.join(transcript_output_base, f"{sanitized_name}.md")
+    transcript_file = secure_path_join(transcript_output_base, f"{sanitized_name}.md")
     with open(transcript_file, "w", encoding="utf-8") as f:
         f.write(f"# Transcription: {video_name}\n\n")
         f.write(f"**Original file**: {video_name}\n")
@@ -299,7 +388,7 @@ def process_video(video_path):
         
         if srt_text:
             # Save SRT text as separate file
-            srt_transcript_file = os.path.join(transcript_output_base, f"{sanitized_name}-subtitles.md")
+            srt_transcript_file = secure_path_join(transcript_output_base, f"{sanitized_name}-subtitles.md")
             with open(srt_transcript_file, "w", encoding="utf-8") as f:
                 f.write(f"# Subtitles: {video_name}\n\n")
                 f.write(f"**Original file**: {video_name}\n")
@@ -313,7 +402,8 @@ def process_video(video_path):
             print("  Failed to extract text from SRT file")
     
     # Clean up audio chunks (but keep the main audio file)
-    chunk_files = glob.glob(os.path.join(audio_output_dir, "chunk_*.wav"))
+    chunk_pattern = secure_path_join(audio_output_dir, "chunk_*.wav")
+    chunk_files = glob.glob(chunk_pattern)
     for chunk in chunk_files:
         os.remove(chunk)
     
