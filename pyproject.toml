@@ -5,11 +5,14 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "chromadb>=1.0.15",
     "langchain-mcp-adapters>=0.1.9",
     "langgraph>=0.5.4",
+    "numpy>=2.3.2",
     "openai>=1.97.1",
     "pydub>=0.25.1",
     "python-dotenv>=1.1.1",
     "srt>=3.5.3",
     "tqdm>=4.67.1",
+    "weaviate-client>=4.16.5",
 ]

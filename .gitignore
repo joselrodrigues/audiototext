@@ -1,10 +1,11 @@
-# Audio/Video Content - Don't upload large media files
+# User Content - Generated/User-specific files (project should be reusable)
 input_videos/
 output_audio/
-
-# Generated Content - Exclude all generated transcriptions and notes
 transcripts/
 knowledge_base/
+
+# Database - ChromaDB vector store (regenerable)
+chroma_db/
 
 # Python
 __pycache__/
@@ -103,3 +104,19 @@ tmp/
 # Backup files
 *.bak
 *.backup
+# Temporary/Generated Files
+test_transcripts/
+test_knowledge/
+global_context_*.json
+test_report_*.json
+preview_*
+migration_*.json
+
+# Development/Debug Files  
+diagnose.py
+migrate_to_enhanced.py
+
+# Backup Files
+backup_*/
+*.backup_*
+*.bak

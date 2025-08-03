@@ -802,12 +802,26 @@ async def process_transcript_to_academic_note_async(transcript_path: str, output
     try:
         final_state = await workflow.ainvoke(initial_state)
         
-        # Generate output filename
+        # Generate output filename preserving folder structure
         base_name = os.path.splitext(os.path.basename(transcript_path))[0]
         # Clean filename for better organization
         clean_name = re.sub(r'[^\w\s-]', '', base_name.lower())
         clean_name = re.sub(r'[\s]+', '-', clean_name)
-        output_path = os.path.join(output_dir, f"{clean_name}.md")
+        
+        # Preserve the folder structure from transcripts to knowledge_base
+        transcript_dir = os.path.dirname(transcript_path)
+        # Get the relative path from transcripts folder
+        if "transcripts" in transcript_dir:
+            rel_path = os.path.relpath(transcript_dir, "transcripts")
+            if rel_path != ".":
+                # Create the corresponding directory structure in knowledge_base
+                course_output_dir = os.path.join(output_dir, rel_path)
+                os.makedirs(course_output_dir, exist_ok=True)
+                output_path = os.path.join(course_output_dir, f"{clean_name}.md")
+            else:
+                output_path = os.path.join(output_dir, f"{clean_name}.md")
+        else:
+            output_path = os.path.join(output_dir, f"{clean_name}.md")
         
         # Save academic note
         with open(output_path, 'w', encoding='utf-8') as f:
