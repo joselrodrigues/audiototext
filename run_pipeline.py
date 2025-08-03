@@ -83,24 +83,28 @@ class PipelineRunner:
             
         return all(checks)
     
-    def run_complete_pipeline(self):
+    def run_complete_pipeline(self, force=False):
         """Run the complete pipeline step by step"""
         print(f"{BLUE}🚀 Enhanced AudioToText Pipeline Runner{RESET}")
         print("=" * 60)
+        
+        if force:
+            print(f"{YELLOW}🔄 Force mode: Will overwrite existing files without asking{RESET}")
         
         if not self.check_prerequisites():
             print(f"\n{RED}❌ Prerequisites not met. Please fix issues above.{RESET}")
             return False
         
         # Define pipeline steps
+        force_flag = " --force" if force else ""
         steps = [
             {
-                'command': 'uv run python batch_transcribe.py',
+                'command': f'uv run python batch_transcribe.py{force_flag}',
                 'description': 'Step 1: Convert videos to transcripts',
                 'skip_if': None  # Always run if there are new videos
             },
             {
-                'command': 'uv run python agents.py batch',
+                'command': f'uv run python agents.py batch{force_flag}',
                 'description': 'Step 2: Generate educational notes (this may take several minutes)',
                 'skip_if': None  # Could add logic to skip if notes exist
             },
@@ -187,13 +191,16 @@ def main():
     """Main entry point"""
     runner = PipelineRunner()
     
-    # Check command line arguments
-    if len(sys.argv) > 1 and sys.argv[1] == '--quick':
+    # Parse command line arguments
+    force = '--force' in sys.argv
+    quick = '--quick' in sys.argv
+    
+    if quick:
         # Just do indexing and enhancement
         success = runner.run_quick_index()
     else:
         # Run complete pipeline
-        success = runner.run_complete_pipeline()
+        success = runner.run_complete_pipeline(force=force)
     
     sys.exit(0 if success else 1)
 

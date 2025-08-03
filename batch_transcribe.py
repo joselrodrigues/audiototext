@@ -28,6 +28,41 @@ if not BASE_URL or not API_KEY:
     print("Error: Please set BASE_URL and API_KEY in your .env file")
     exit(1)
 
+def check_existing_transcriptions(video_path, output_folder):
+    """Check if transcriptions already exist for a video file."""
+    video_name = Path(video_path).stem
+    course_folder = Path(video_path).parent.name
+    
+    # Build expected output paths
+    transcript_dir = secure_path_join(TRANSCRIPTS_FOLDER, course_folder)
+    transcript_file = secure_path_join(transcript_dir, f"{video_name}.md")
+    subtitle_file = secure_path_join(transcript_dir, f"{video_name}-subtitles.md")
+    
+    existing_files = []
+    if os.path.exists(transcript_file):
+        existing_files.append(transcript_file)
+    if os.path.exists(subtitle_file):
+        existing_files.append(subtitle_file)
+    
+    return existing_files
+
+def ask_user_confirmation(message, default="n"):
+    """Ask user for confirmation with a default option."""
+    valid_responses = {"y": True, "yes": True, "n": False, "no": False}
+    prompt = f"{message} [y/N]: " if default == "n" else f"{message} [Y/n]: "
+    
+    while True:
+        try:
+            response = input(prompt).lower().strip()
+            if not response:
+                return valid_responses[default]
+            if response in valid_responses:
+                return valid_responses[response]
+            print("Please answer with 'y' or 'n' (or 'yes' or 'no').")
+        except KeyboardInterrupt:
+            print("\nOperation cancelled by user.")
+            return False
+
 def secure_path_join(base_dir, *paths):
     """Safely join paths ensuring the result stays within base_dir."""
     # Get absolute base directory
@@ -411,7 +446,14 @@ def process_video(video_path):
 
 
 def main():
+    import sys
+    
+    # Check for force flag
+    force_mode = '--force' in sys.argv
+    
     print("=== Batch Video Transcription Tool ===\n")
+    if force_mode:
+        print("🔄 Force mode: Will overwrite existing transcriptions without asking\n")
     
     # Create folder structure
     create_folder_structure()
@@ -431,13 +473,37 @@ def main():
     # Process each video
     successful = 0
     failed = 0
+    skipped = 0
     
     for video_path in video_files:
         try:
-            if process_video(video_path):
-                successful += 1
+            # Check if transcriptions already exist
+            existing_files = check_existing_transcriptions(video_path, OUTPUT_FOLDER)
+            
+            if existing_files:
+                print(f"\n📄 Transcriptions already exist for '{os.path.basename(video_path)}':")
+                for file in existing_files:
+                    print(f"  - {os.path.relpath(file)}")
+                
+                if force_mode or ask_user_confirmation(f"Do you want to re-process '{os.path.basename(video_path)}'?"):
+                    if force_mode:
+                        print(f"🔄 Force re-processing {os.path.basename(video_path)}...")
+                    else:
+                        print(f"🔄 Re-processing {os.path.basename(video_path)}...")
+                    if process_video(video_path):
+                        successful += 1
+                    else:
+                        failed += 1
+                else:
+                    print(f"⏭️  Skipping {os.path.basename(video_path)}")
+                    skipped += 1
             else:
-                failed += 1
+                print(f"\n🎬 Processing {os.path.basename(video_path)}...")
+                if process_video(video_path):
+                    successful += 1
+                else:
+                    failed += 1
+                    
         except Exception as e:
             print(f"\nError processing {os.path.basename(video_path)}: {e}")
             failed += 1
@@ -449,6 +515,7 @@ def main():
     print(f"Total videos: {len(video_files)}")
     print(f"Successful: {successful}")
     print(f"Failed: {failed}")
+    print(f"Skipped: {skipped}")
     print(f"\nTranscriptions saved in: {TRANSCRIPTS_FOLDER}/")
     print(f"Audio files saved in: {OUTPUT_FOLDER}/")
 

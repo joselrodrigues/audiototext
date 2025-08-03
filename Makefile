@@ -10,6 +10,7 @@ help:
 	@echo ""
 	@echo "🚀 QUICK START:"
 	@echo "  make all           - Run complete pipeline (videos → enhanced notes)"
+	@echo "  make all-force     - Run pipeline without asking about existing files"
 	@echo "  make quick-start   - Setup + test system"
 	@echo ""
 	@echo "📋 STEP-BY-STEP WORKFLOW:"
@@ -47,6 +48,15 @@ pipeline-safe:
 all:
 	@echo "🚀 Running complete pipeline (timeout-safe)..."
 	@uv run python run_pipeline.py
+	@echo ""
+	@echo "🎉 Complete pipeline finished!"
+	@echo "📁 Check knowledge_base/ for enhanced educational notes"
+	@echo "🔍 Use 'make search QUERY=\"your query\"' to search content"
+
+# Complete pipeline with force mode (no confirmations)
+all-force:
+	@echo "🚀 Running complete pipeline in force mode (no confirmations)..."
+	@uv run python run_pipeline.py --force
 	@echo ""
 	@echo "🎉 Complete pipeline finished!"
 	@echo "📁 Check knowledge_base/ for enhanced educational notes"

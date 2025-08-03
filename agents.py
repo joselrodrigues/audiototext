@@ -857,7 +857,45 @@ def process_transcript_to_academic_note(transcript_path: str, output_dir: str = 
     """Sync wrapper for transcript processing with MCP integration"""
     return asyncio.run(process_transcript_to_academic_note_async(transcript_path, output_dir))
 
-def batch_process_transcripts(transcripts_dir: str = "transcripts", output_dir: str = "knowledge_base"):
+def check_existing_note(transcript_path: str, output_dir: str = "knowledge_base") -> str:
+    """Check if a knowledge note already exists for a transcript."""
+    transcript_file_path = Path(transcript_path)
+    
+    # Extract base name and clean it
+    base_name = transcript_file_path.stem
+    clean_name = base_name.replace('-subtitles', '').replace('_subtitles', '')
+    
+    # Build expected output path preserving folder structure
+    if "transcripts" in str(transcript_file_path.parent):
+        rel_path = os.path.relpath(transcript_file_path.parent, "transcripts")
+        if rel_path != ".":
+            course_output_dir = os.path.join(output_dir, rel_path)
+            expected_note_path = os.path.join(course_output_dir, f"{clean_name}.md")
+        else:
+            expected_note_path = os.path.join(output_dir, f"{clean_name}.md")
+    else:
+        expected_note_path = os.path.join(output_dir, f"{clean_name}.md")
+    
+    return expected_note_path if os.path.exists(expected_note_path) else None
+
+def ask_user_confirmation(message, default="n"):
+    """Ask user for confirmation with a default option."""
+    valid_responses = {"y": True, "yes": True, "n": False, "no": False}
+    prompt = f"{message} [y/N]: " if default == "n" else f"{message} [Y/n]: "
+    
+    while True:
+        try:
+            response = input(prompt).lower().strip()
+            if not response:
+                return valid_responses[default]
+            if response in valid_responses:
+                return valid_responses[response]
+            print("Please answer with 'y' or 'n' (or 'yes' or 'no').")
+        except KeyboardInterrupt:
+            print("\nOperation cancelled by user.")
+            return False
+
+def batch_process_transcripts(transcripts_dir: str = "transcripts", output_dir: str = "knowledge_base", force_mode: bool = False):
     """Process all transcript files in a directory including subtitles"""
     # Test LLM connection before processing
     print("Testing connection to LLM service...")
@@ -865,6 +903,9 @@ def batch_process_transcripts(transcripts_dir: str = "transcripts", output_dir: 
         print("\n❌ Cannot proceed without LLM connection. Please check your configuration.")
         return
     print("✅ LLM connection successful!\n")
+    
+    if force_mode:
+        print("🔄 Force mode: Will overwrite existing notes without asking\n")
     
     transcript_files = []
     
@@ -882,31 +923,59 @@ def batch_process_transcripts(transcripts_dir: str = "transcripts", output_dir: 
         print(f"  {i}. {file}")
     
     processed_successfully = 0
+    skipped = 0
+    
     for transcript_file in transcript_files:
         if processing_interrupted:
             print("\n\n🛑 Batch processing interrupted by user")
             break
+        
+        # Check if note already exists
+        existing_note = check_existing_note(transcript_file, output_dir)
+        
+        if existing_note:
+            print(f"\n📄 Note already exists for '{os.path.basename(transcript_file)}':")
+            print(f"  - {os.path.relpath(existing_note)}")
             
-        print(f"\n--- Processing ({processed_successfully + 1}/{len(transcript_files)}): {transcript_file} ---")
-        result = process_transcript_to_academic_note(transcript_file, output_dir)
-        if result:
-            processed_successfully += 1
+            if force_mode or ask_user_confirmation(f"Do you want to re-process '{os.path.basename(transcript_file)}'?"):
+                if force_mode:
+                    print(f"\n🔄 Force re-processing ({processed_successfully + 1}/{len(transcript_files)}): {transcript_file}")
+                else:
+                    print(f"\n🔄 Re-processing ({processed_successfully + 1}/{len(transcript_files)}): {transcript_file}")
+                result = process_transcript_to_academic_note(transcript_file, output_dir)
+                if result:
+                    processed_successfully += 1
+                else:
+                    print(f"Failed to process: {transcript_file}")
+            else:
+                print(f"⏭️  Skipping {os.path.basename(transcript_file)}")
+                skipped += 1
         else:
-            print(f"Failed to process: {transcript_file}")
+            print(f"\n📝 Processing ({processed_successfully + 1}/{len(transcript_files)}): {transcript_file}")
+            result = process_transcript_to_academic_note(transcript_file, output_dir)
+            if result:
+                processed_successfully += 1
+            else:
+                print(f"Failed to process: {transcript_file}")
     
     print(f"\n=== Batch Processing {'Interrupted' if processing_interrupted else 'Complete'} ===")
     print(f"Successfully processed: {processed_successfully}/{len(transcript_files)} files")
+    print(f"Skipped: {skipped} files")
     if processing_interrupted:
-        print(f"Skipped: {len(transcript_files) - processed_successfully} files due to interruption")
+        remaining = len(transcript_files) - processed_successfully - skipped
+        print(f"Interrupted: {remaining} files not processed due to interruption")
     print(f"Academic notes saved in: {output_dir}/")
 
 if __name__ == "__main__":
     # Example usage
     import sys
     
+    # Check for force flag
+    force_mode = '--force' in sys.argv
+    
     if len(sys.argv) > 1:
-        if sys.argv[1] == "batch":
-            batch_process_transcripts()
+        if sys.argv[1] == "batch" or "batch" in sys.argv:
+            batch_process_transcripts(force_mode=force_mode)
         else:
             transcript_file = sys.argv[1]
             # Validate the file path before processing
