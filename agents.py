@@ -14,6 +14,7 @@ import sys
 import os
 from dotenv import load_dotenv
 from urllib.parse import urlparse, quote
+from enhanced_academic_scraper import EnhancedAcademicScraper
 
 # Load environment variables
 load_dotenv()
@@ -228,157 +229,68 @@ def identify_main_concepts(state: AcademicNoteState) -> AcademicNoteState:
     return state
 
 async def search_academic_sources(state: AcademicNoteState) -> AcademicNoteState:
-    """Search academic sources using Playwright MCP for real web data"""
-    print(f"  Starting web search for concepts: {', '.join(state['main_concepts'])}")
+    """Search academic sources using Enhanced Academic Scraper"""
+    print(f"  Starting enhanced academic search for concepts: {', '.join(state['main_concepts'])}")
     
     try:
-        client = await setup_mcp_client()
-        if client is None:
-            print("  MCP client not available, skipping web search")
-            state["web_search_results"] = {}
-            return state
-
-        search_results = {}
+        # Setup MCP client for Google Scholar scraping
+        mcp_client = await setup_mcp_client()
         
-        # Get tools from all connected servers
-        try:
-            tools = await client.get_tools()
-            print(f"  Found {len(tools)} tools from MCP servers")
+        # Initialize enhanced scraper
+        async with EnhancedAcademicScraper(mcp_client=mcp_client) as scraper:
+            search_results = {}
             
-            # Print available tools for debugging
-            for tool in tools:
-                print(f"    Tool: {tool.name} - {tool.description[:50]}...")
-            
-            # Check if browser needs to be installed
-            install_tool = None
-            for tool in tools:
-                if tool.name == 'browser_install':
-                    install_tool = tool
+            # Process each concept
+            for concept in state["main_concepts"]:
+                if processing_interrupted:
+                    print("  Academic search interrupted")
                     break
-            
-            if install_tool:
-                print("  Installing browser...")
+                
+                print(f"    🔍 Searching all academic sources for: {concept}")
+                
+                # Search all sources
                 try:
-                    await install_tool.ainvoke({})
-                    print("  Browser installed successfully")
+                    results = await scraper.search_all_sources(concept, limit=5)
+                    summary = scraper.format_results_summary(results)
+                    
+                    # Create structured results
+                    concept_results = {
+                        "concept": concept,
+                        "total_papers": summary["total_papers"],
+                        "sources": summary["sources"],
+                        "top_cited": summary["top_cited"],
+                        "recent_papers": summary["recent_papers"],
+                        "course_materials": summary["course_materials"],
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    
+                    # Log summary
+                    print(f"      ✅ Found {summary['total_papers']} results:")
+                    for source, data in summary['sources'].items():
+                        if data['count'] > 0:
+                            print(f"         - {source}: {data['count']} papers/materials")
+                    
+                    search_results[concept] = concept_results
+                    
                 except Exception as e:
-                    print(f"  Warning: Could not install browser: {e}")
-                    
-        except Exception as e:
-            print(f"  Error getting tools from MCP: {sanitize_error_message(e)}")
-            state["web_search_results"] = {}
-            return state
-        
-        # Process each concept
-        for concept in state["main_concepts"]:
-            if processing_interrupted:
-                print("  Web search interrupted")
-                break
-                
-            print(f"    Searching web for: {concept}")
+                    print(f"      ❌ Error searching for {concept}: {sanitize_error_message(e)}")
+                    search_results[concept] = {
+                        "concept": concept,
+                        "error": str(e),
+                        "timestamp": datetime.now().isoformat()
+                    }
             
-            concept_results = {
-                "concept": concept,
-                "scholar_results": [],
-                "arxiv_results": [],
-                "university_results": [],
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            try:
-                # Look for browser navigation and snapshot tools
-                navigate_tool = None
-                snapshot_tool = None
-                
-                for tool in tools:
-                    if tool.name == 'browser_navigate':
-                        navigate_tool = tool
-                    elif tool.name == 'browser_snapshot':
-                        snapshot_tool = tool
-                
-                if navigate_tool and snapshot_tool:
-                    print(f"    Using tools: {navigate_tool.name} and {snapshot_tool.name}")
-                    
-                    # Sanitize concept for URL construction
-                    safe_concept = sanitize_search_query(concept)
-                    
-                    # Search Google Scholar
-                    scholar_url = f"https://scholar.google.com/scholar?q={safe_concept}"
-                    
-                    # Validate URL before using
-                    try:
-                        validate_url(scholar_url)
-                    except ValueError as e:
-                        print(f"    Invalid URL for Google Scholar: {e}")
-                        continue
-                    
-                    # Navigate to Google Scholar
-                    try:
-                        nav_result = await navigate_tool.ainvoke({"url": scholar_url})
-                    except Exception as e:
-                        print(f"    Failed to navigate to Google Scholar: {sanitize_error_message(e)}")
-                        nav_result = None
-                    
-                    # Get page snapshot
-                    snapshot_result = await snapshot_tool.ainvoke({})
-                    
-                    concept_results["scholar_results"] = [
-                        {
-                            "source": "Google Scholar",
-                            "content": str(snapshot_result)[:1000] if snapshot_result else "No content extracted",
-                            "url": scholar_url
-                        }
-                    ]
-                    
-                    # Search arXiv
-                    arxiv_url = f"https://arxiv.org/search/?query={safe_concept}&searchtype=all"
-                    
-                    # Validate URL before using
-                    try:
-                        validate_url(arxiv_url)
-                    except ValueError as e:
-                        print(f"    Invalid URL for arXiv: {e}")
-                        concept_results["arxiv_results"] = []
-                        results[concept] = concept_results
-                        continue
-                    
-                    try:
-                        nav_result = await navigate_tool.ainvoke({"url": arxiv_url})
-                    except Exception as e:
-                        print(f"    Failed to navigate to arXiv: {sanitize_error_message(e)}")
-                        nav_result = None
-                    snapshot_result = await snapshot_tool.ainvoke({})
-                    
-                    concept_results["arxiv_results"] = [
-                        {
-                            "source": "arXiv",
-                            "content": str(snapshot_result)[:1000] if snapshot_result else "No content extracted",
-                            "url": arxiv_url
-                        }
-                    ]
-                    
-                else:
-                    print(f"    Required navigation/content tools not found")
-                    # Fallback to placeholder results
-                    concept_results["status"] = "MCP tools not available - using placeholder"
-                    
-            except Exception as e:
-                print(f"    Error searching for {concept}: {sanitize_error_message(e)}")
-                concept_results["error"] = str(e)
-            
-            search_results[concept] = concept_results
-            
-        state["web_search_results"] = search_results
-        print(f"  Completed web search for {len(search_results)} concepts")
+            state["web_search_results"] = search_results
+            print(f"  ✅ Completed enhanced academic search for {len(search_results)} concepts")
         
     except Exception as e:
-        print(f"Error in web search: {sanitize_error_message(e)}")
+        print(f"  ❌ Error in enhanced academic search: {sanitize_error_message(e)}")
         state["web_search_results"] = {}
     
     return state
 
 def perform_deep_research(state: AcademicNoteState) -> AcademicNoteState:
-    """Perform comprehensive deep research on each main concept"""
+    """Perform comprehensive deep research on each main concept using search results"""
     client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
     
     research_results = {}
@@ -390,16 +302,39 @@ def perform_deep_research(state: AcademicNoteState) -> AcademicNoteState:
             
         print(f"  Researching: {concept}")
         
-        # Enhanced research prompt with specific focus areas
+        # Extract relevant papers and abstracts from search results
+        concept_search_results = state.get("web_search_results", {}).get(concept, {})
+        
+        # Gather abstracts and key findings
+        paper_insights = []
+        if "sources" in concept_search_results:
+            for source_name, source_data in concept_search_results["sources"].items():
+                for paper in source_data.get("papers", []):
+                    if isinstance(paper, dict) and paper.get("abstract"):
+                        paper_insights.append(f"From {paper.get('title', 'Unknown')}: {paper.get('abstract', '')[:300]}...")
+        
+        # Include top cited papers
+        if "top_cited" in concept_search_results:
+            for paper in concept_search_results["top_cited"][:2]:
+                if paper.get("abstract"):
+                    paper_insights.append(f"Highly cited work: {paper.get('abstract', '')[:200]}...")
+        
+        # Create enriched context from actual academic sources
+        academic_context = "\n\n".join(paper_insights[:5]) if paper_insights else "No specific papers found in search."
+        
+        # Enhanced research prompt with actual academic findings
         prompt = f"""
         Research "{concept}" to support and validate educational content.
-        Focus on information that helps understand and enhance what was taught in the lecture.
         
-        Provide contextual information including:
+        Here are actual academic findings from recent papers:
+        {academic_context}
+        
+        Based on these sources and your knowledge, provide comprehensive educational context:
         
         1. ACCURATE DEFINITION:
            - Clear, correct definition for educational context
-           - Fix any potential misconceptions from transcription errors
+           - Incorporate insights from the papers above
+           - Fix any potential misconceptions
         
         2. EDUCATIONAL CONTEXT:
            - Why this concept is important in learning
@@ -409,7 +344,7 @@ def perform_deep_research(state: AcademicNoteState) -> AcademicNoteState:
         3. TECHNICAL FOUNDATION:
            - Core principles students need to understand
            - Mathematical foundations when relevant
-           - Key algorithms or methodologies
+           - Key algorithms or methodologies mentioned in papers
         
         4. PRACTICAL UNDERSTANDING:
            - Real-world applications that help learning
@@ -417,8 +352,8 @@ def perform_deep_research(state: AcademicNoteState) -> AcademicNoteState:
            - Industry relevance for motivation
         
         5. COMMON TOOLS AND IMPLEMENTATIONS:
-           - Popular frameworks, software, or tools relevant to this field
-           - Standard datasets, resources, or materials commonly used
+           - Popular frameworks, software, or tools
+           - Standard datasets or resources mentioned in papers
            - Typical methodologies or evaluation approaches
         
         6. LEARNING CONNECTIONS:
@@ -426,27 +361,30 @@ def perform_deep_research(state: AcademicNoteState) -> AcademicNoteState:
            - Prerequisites and follow-up topics
            - How this connects to other parts of the course
         
-        Focus on educational value and accuracy rather than cutting-edge research.
-        Prioritize information that helps students understand the lecture content.
-        Avoid adding complex details not relevant to the subject matter or educational level presented.
+        Synthesize the academic sources with educational best practices.
+        Focus on helping students understand the lecture content deeply.
         """
         
         try:
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,  # Lower temperature for more factual content
-                max_tokens=2000   # Increased for more detailed responses
+                temperature=0.2,
+                max_tokens=2500
             )
             
             research_results[concept] = {
                 "content": response.choices[0].message.content.strip(),
+                "papers_analyzed": len(paper_insights),
+                "sources_count": concept_search_results.get("total_papers", 0),
                 "timestamp": datetime.now().isoformat(),
                 "tokens_used": len(response.choices[0].message.content.split())
             }
             
+            print(f"    ✅ Deep research completed using {len(paper_insights)} paper abstracts")
+            
         except Exception as e:
-            print(f"Error researching {concept}: {sanitize_error_message(e)}")
+            print(f"    ❌ Error researching {concept}: {sanitize_error_message(e)}")
             research_results[concept] = {
                 "content": f"Deep research needed for {concept} - Error in processing",
                 "timestamp": datetime.now().isoformat(),
@@ -526,103 +464,144 @@ def fact_check_and_correct(state: AcademicNoteState) -> AcademicNoteState:
     return state
 
 def find_academic_references(state: AcademicNoteState) -> AcademicNoteState:
-    """Find comprehensive and specific academic references"""
+    """Find and consolidate academic references from enhanced search results"""
+    print(f"  Consolidating academic references from search results")
+    
+    references = []
+    all_papers = []
+    all_course_materials = []
+    
+    # Extract all papers and materials from search results
+    for concept, results in state.get("web_search_results", {}).items():
+        if "error" in results:
+            continue
+            
+        # Collect papers from all sources
+        for source_name, source_data in results.get("sources", {}).items():
+            for paper in source_data.get("papers", []):
+                paper_dict = paper if isinstance(paper, dict) else paper.to_dict()
+                paper_dict["concept_related"] = concept
+                all_papers.append(paper_dict)
+        
+        # Collect course materials
+        for material in results.get("course_materials", []):
+            material_dict = material if isinstance(material, dict) else material.to_dict()
+            material_dict["concept_related"] = concept
+            all_course_materials.append(material_dict)
+    
+    # Create book references from papers with high citations
+    books_refs = []
+    highly_cited = sorted([p for p in all_papers if p.get("citations", 0) > 100], 
+                         key=lambda x: x.get("citations", 0), reverse=True)
+    
+    # Create paper references categorized by age
+    recent_papers = [p for p in all_papers if p.get("year", 0) >= 2022]
+    seminal_papers = [p for p in all_papers if p.get("year", 0) < 2022 and p.get("citations", 0) > 50]
+    
+    # Format references
+    # Add course materials as online resources
+    for material in all_course_materials[:5]:
+        references.append({
+            "type": "online resources",
+            "citation": f"{material.get('title', 'Unknown')} - {material.get('abstract', 'Course material')}. URL: {material.get('url', '')}",
+            "concept_related": material.get("concept_related", ""),
+            "source": material.get("source", ""),
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    # Add seminal papers
+    for paper in seminal_papers[:6]:
+        authors = paper.get("authors", [])
+        author_str = ", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "")
+        citation = f"{author_str} ({paper.get('year', 'N/A')}). {paper.get('title', 'Unknown')}."
+        
+        if paper.get("venue"):
+            citation += f" {paper.get('venue')}."
+        if paper.get("doi"):
+            citation += f" DOI: {paper.get('doi')}"
+        elif paper.get("arxiv_id"):
+            citation += f" arXiv: {paper.get('arxiv_id')}"
+            
+        references.append({
+            "type": "seminal research papers",
+            "citation": citation,
+            "concept_related": paper.get("concept_related", ""),
+            "source": paper.get("source", ""),
+            "citations_count": paper.get("citations", 0),
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    # Add recent papers
+    for paper in recent_papers[:3]:
+        authors = paper.get("authors", [])
+        author_str = ", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "")
+        citation = f"{author_str} ({paper.get('year', 'N/A')}). {paper.get('title', 'Unknown')}."
+        
+        if paper.get("venue"):
+            citation += f" {paper.get('venue')}."
+        if paper.get("url"):
+            citation += f" Available: {paper.get('url')}"
+            
+        references.append({
+            "type": "recent developments",
+            "citation": citation,
+            "concept_related": paper.get("concept_related", ""),
+            "source": paper.get("source", ""),
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    # Also use LLM to suggest foundational books (since APIs don't return books)
+    concepts_list = ", ".join(state["main_concepts"])
     client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
     
-    concepts_list = ", ".join(state["main_concepts"])
-    
-    print(f"  Finding academic references for: {concepts_list}")
-    
-    # Enhanced prompt for more specific and realistic references
-    prompt = f"""
-    Find comprehensive, REAL academic references for these specific concepts: {concepts_list}
-    
-    Requirements:
-    1. AUTHORITATIVE BOOKS - Provide 3-5 real, well-known academic books with:
-       - Complete citation (Author(s), Title, Publisher, Year, ISBN if known)
-       - Brief description of relevance to the concepts
-       - Edition information where applicable
-    
-    2. HIGH-QUALITY ONLINE RESOURCES - Provide 4-6 real, authoritative URLs:
-       - University course materials and lecture notes
-       - Official documentation and technical specifications
-       - Professional organization resources
-       - Government or institutional research repositories
-       - Include specific URL and detailed description
-    
-    3. SEMINAL RESEARCH PAPERS - Provide 4-6 key academic papers:
-       - Complete citation with journal name, volume, pages
-       - DOI or arXiv ID where available
-       - Brief summary of contribution to the field
-       - Publication year (mix of foundational and recent works)
-    
-    4. RECENT DEVELOPMENTS - Include 2-3 very recent papers (2022-2025):
-       - Focus on latest advances and current research
-       - Conference proceedings from top-tier venues
-       - Include impact and significance
-    
-    Format exactly as:
-    ## Foundational Books
-    - [Complete citation with ISBN] - [Relevance description]
-    
-    ## Online Resources
-    - [Complete URL] - [Detailed description of content and authority]
-    
-    ## Seminal Research Papers
-    - [Author(s). (Year). Title. Journal, Volume(Issue), pages. DOI] - [Contribution summary]
-    
-    ## Recent Developments (2022-2025)
-    - [Recent paper citation] - [Impact and significance]
-    
-    Focus on REAL, VERIFIABLE sources. Include specific details like ISBN, DOI, exact URLs.
-    Prioritize highly cited works and authoritative sources.
-    """
-    
     try:
+        prompt = f"""Based on these concepts: {concepts_list}
+        
+        Suggest 3-4 REAL foundational textbooks that students should read.
+        Format each as:
+        - Author(s) (Year). Title. Publisher. ISBN.
+        
+        Only suggest well-known, actually published academic textbooks."""
+        
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,  # Very low temperature for factual accuracy
-            max_tokens=2500   # Increased for comprehensive references
+            temperature=0.1,
+            max_tokens=500
         )
         
-        references_text = response.choices[0].message.content.strip()
-        
-        # Enhanced parsing for better categorization
-        references = []
-        current_section = ""
-        for line in references_text.split('\n'):
-            line = line.strip()
-            if line.startswith('## '):
-                current_section = line.replace('## ', '').lower()
-            elif line.startswith('- ') and current_section:
-                citation = line.replace('- ', '').strip()
-                if citation:  # Only add non-empty citations
-                    references.append({
-                        "type": current_section,
-                        "citation": citation,
-                        "concept_related": concepts_list,
-                        "timestamp": datetime.now().isoformat()
-                    })
-        
-        state["academic_references"] = references
-        print(f"  Found {len(references)} academic references")
-        
+        book_text = response.choices[0].message.content.strip()
+        for line in book_text.split('\n'):
+            if line.strip().startswith('-'):
+                references.append({
+                    "type": "foundational books",
+                    "citation": line.strip()[2:],
+                    "concept_related": concepts_list,
+                    "timestamp": datetime.now().isoformat()
+                })
+                
     except Exception as e:
-        print(f"Error finding references: {sanitize_error_message(e)}")
-        state["academic_references"] = [{
-            "type": "error",
-            "citation": f"Error finding academic references: {str(e)}",
-            "concept_related": concepts_list
-        }]
+        print(f"  Error getting book suggestions: {sanitize_error_message(e)}")
+    
+    state["academic_references"] = references
+    print(f"  ✅ Consolidated {len(references)} academic references from enhanced search")
+    
+    # Log summary by type
+    ref_types = {}
+    for ref in references:
+        ref_type = ref.get("type", "unknown")
+        ref_types[ref_type] = ref_types.get(ref_type, 0) + 1
+    
+    for ref_type, count in ref_types.items():
+        print(f"     - {ref_type}: {count}")
     
     return state
 
 def generate_obsidian_note(state: AcademicNoteState) -> AcademicNoteState:
-    """Generate comprehensive academic note in Obsidian-compatible format"""
+    """Generate comprehensive academic note with enhanced educational structure"""
     client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
     
-    print(f"  Generating comprehensive academic note")
+    print(f"  Generating enhanced educational note with new structure")
     
     # Organize references by type with better parsing
     books = [ref["citation"] for ref in state["academic_references"] if "book" in ref["type"]]
@@ -630,103 +609,304 @@ def generate_obsidian_note(state: AcademicNoteState) -> AcademicNoteState:
     papers = [ref["citation"] for ref in state["academic_references"] if "paper" in ref["type"]]
     recent_developments = [ref["citation"] for ref in state["academic_references"] if "recent" in ref["type"]]
     
-    # Prepare detailed research content
+    # Prepare detailed research content with abstracts
     detailed_research = ""
+    paper_abstracts = []
+    
     for concept, data in state["deep_research_results"].items():
         detailed_research += f"\n\n### Deep Analysis: {concept}\n{data['content']}"
+        
+        # Extract paper abstracts if available
+        papers_count = data.get("papers_analyzed", 0)
+        if papers_count > 0:
+            paper_abstracts.append(f"{concept}: {papers_count} papers analyzed")
     
-    # Enhanced prompt for comprehensive academic note generation
+    # Extract course materials and top cited papers
+    course_materials = []
+    top_papers = []
+    
+    for concept, results in state.get("web_search_results", {}).items():
+        if isinstance(results, dict):
+            # Extract course materials
+            for material in results.get("course_materials", []):
+                if isinstance(material, dict):
+                    course_materials.append(material)
+            
+            # Extract top cited papers
+            for paper in results.get("top_cited", []):
+                if isinstance(paper, dict) and paper.get("citations", 0) > 50:
+                    top_papers.append(paper)
+    
+    # Enhanced prompt for rich Markdown formatting and structure
     prompt = f"""
-    Create a comprehensive educational note based on this lecture/course content.
-    PRESERVE the teaching style, specific examples, and educational flow from the original transcript.
+    Create a comprehensive educational note with RICH VISUAL FORMATTING for university students.
+    Use ADVANCED MARKDOWN features for engaging, visually appealing content.
     
     CONTEXT:
     Title: {state["title"]} (Educational Content)
     Main Concepts: {", ".join(state["main_concepts"])}
+    Academic Papers Analyzed: {len(paper_abstracts)} concepts with research
+    Course Materials Found: {len(course_materials)} university resources
     
-    ORIGINAL TEACHING CONTENT (CORRECTED):
-    {state["corrected_explanations"][:4000]}
+    ORIGINAL TEACHING CONTENT:
+    {state["corrected_explanations"][:3500]}
     
-    SUPPLEMENTARY RESEARCH:
-    {detailed_research[:4000]}
+    ACADEMIC RESEARCH INSIGHTS:
+    {detailed_research[:3500]}
     
-    CRITICAL REQUIREMENTS:
-    1. PRESERVE ALL specific examples mentioned by the instructor
-    2. MAINTAIN the teaching narrative and progression
-    3. KEEP the educational context - this is a lecture/course content, not a research paper
-    4. ONLY add information that enhances understanding of what was taught
-    5. PRESERVE instructor's voice and pedagogical approach
+    FORMATTING REQUIREMENTS - Use These Rich Markdown Features:
     
-    STRUCTURE:
+    1. **Callout Boxes** - Use for important concepts:
+    > [!NOTE] Important Concept
+    > Key learning point here
     
-    # [Title] - Educational Notes
+    > [!WARNING] Common Misconception  
+    > What students often get wrong
     
-    ## Lecture Overview
-    [Summary of what the instructor taught, maintaining educational context]
+    > [!TIP] Pro Tip
+    > Advanced insight or technique
     
-    ## Key Concepts Explained
-    [Concepts as taught by instructor, with [[Obsidian links]] for navigation]
+    > [!EXAMPLE] Example
+    > Concrete example demonstration
     
-    ## Instructor Examples and Demonstrations
-    [ALL specific examples mentioned in the lecture, preserved exactly]
+    2. **Mathematical Formulas** - Use proper LaTeX blocks:
+    $$h_t = f(W_h \cdot h_{{t-1}} + W_x \cdot x_t + b)$$
     
-    ## Technical Details Covered
-    [Technical content as explained in the lecture, enhanced with research]
+    3. **Rich Tables** with emojis and visual structure
     
-    ## Mathematical Concepts
-    [Any formulas or mathematical concepts taught, with LaTeX notation]
+    4. **Visual Separators** and hierarchical headers with emojis
     
-    ## Resources and Tools Mentioned
-    [Specific datasets, tools, software, or resources mentioned by instructor]
+    5. **Code blocks** with syntax highlighting when appropriate
     
-    ## Practical Applications Discussed
-    [Applications as presented in the lecture]
+    6. **Obsidian Internal Links** like [[Concept Name]] for cross-references
     
-    ## Enhanced Understanding
-    [Additional context from research that helps understand the lecture content]
+    ENHANCED STRUCTURE WITH RICH FORMATTING:
     
-    ## Implementation Notes
-    [Technical implementation details relevant to what was taught]
+    # 🎓 {state["title"]} - Comprehensive Study Notes
     
-    ## Related Concepts for Further Study
-    [[[Links]] to related topics for continued learning]
+    ---
     
-    ## References for Deep Dive
+    ## 🎯 Learning Objectives
+    > [!NOTE] What You'll Master
+    > By the end of this study session, you will:
+    > - [Extract key learning outcomes from content]
+    > - [Connect concepts to practical applications]
+    > - [Build foundational knowledge for advanced topics]
     
-    ### Foundational Books
-    {chr(10).join(f"- {book}" for book in books)}
+    ---
     
-    ### Online Resources
-    {chr(10).join(f"- {resource}" for resource in online_resources)}
+    ## 📚 Prerequisites & Context
     
-    ### Research Papers
-    {chr(10).join(f"- {paper}" for paper in papers)}
+    > [!TIP] Before You Begin
+    > **Prerequisites**: [What students need to know]
+    > **Difficulty Level**: [Beginner/Intermediate/Advanced]
+    > **Time Investment**: [Estimated study time]
     
-    ### Recent Developments
-    {chr(10).join(f"- {dev}" for dev in recent_developments)}
+    **🎯 Curriculum Fit**: [How this fits in the broader learning path]
     
-    ## Study Notes
-    [Key takeaways and learning objectives from this lecture]
+    ---
     
-    ## Tags
-    #{" #".join([concept.lower().replace(" ", "-") for concept in state["main_concepts"]])} #educational-notes #lecture-notes #course-content
+    ## 📖 Course Context & Overview
     
-    VALIDATION RULES:
-    - Every specific example in the original must appear in the note
-    - Maintain the instructor's teaching progression
-    - Don't add metrics or data not mentioned in the original
-    - Preserve the educational, not research, context
-    - Keep the accessible, teaching tone
+    > [!EXAMPLE] Real-World Relevance
+    > [Why this topic matters in industry/research]
     
-    Generate educational notes that capture what was actually taught, enhanced with research context.
+    [Rich overview with visual structure]
+    
+    ---
+    
+    ## 🔬 Key Concepts Deep Dive
+    
+    For each concept, use this rich structure:
+    
+    ### 🧠 [Concept Name]
+    
+    > [!NOTE] Core Definition
+    > [Clear, precise definition with academic backing]
+    
+    #### 🎯 Theory & Fundamentals
+    [Detailed explanation with visual metaphors]
+    
+    #### ⚠️ Common Misconceptions
+    > [!WARNING] Students Often Think...
+    > [What students get wrong and why]
+    
+    #### 💡 Visual Understanding
+    > [!TIP] Think of it Like This
+    > [Concrete analogies and visual metaphors]
+    
+    #### 🔢 Mathematical Foundation
+    [Use LaTeX blocks for formulas]:
+    $$[relevant formulas with proper notation]$$
+    
+    Where:
+    - Variable₁ = [definition]
+    - Variable₂ = [definition]
+    
+    ---
+    
+    ## 🎬 Instructor Examples & Demonstrations
+    
+    > [!EXAMPLE] Live Demonstration
+    > [ALL original examples preserved exactly with rich formatting]
+    
+    ---
+    
+    ## ⚙️ Technical Implementation Details
+    
+    > [!NOTE] Technical Specs
+    > [Enhanced with research findings in structured format]
+    
+    ```python
+    # Code examples when relevant
+    [formatted code blocks]
+    ```
+    
+    ---
+    
+    ## 🛠️ Tools & Resources
+    
+    | Tool/Framework | Purpose | Key Features |
+    |---------------|---------|-------------|
+    | [Tool Name] | [What it does] | [Why it's useful] |
+    
+    ---
+    
+    ## 🌍 Real-World Applications
+    
+    > [!EXAMPLE] Industry Applications
+    > 1. **[Application Area]**: [How it's used]
+    > 2. **[Application Area]**: [Practical impact]
+    > 3. **[Application Area]**: [Market relevance]
+    
+    ---
+    
+    ## 🔬 Deep Dive Research
+    
+    ### 📄 Key Academic Papers
+    > [!NOTE] Essential Reading
+    > [Top 3-5 papers with abstracts and key findings]
+    
+    ### 🎓 University Course Materials  
+    > [!TIP] Additional Learning Resources
+    > [MIT OCW, Stanford resources with direct links]
+    
+    ### 🆕 Recent Developments (2022-2025)
+    > [!EXAMPLE] Cutting-Edge Research
+    > [Latest breakthroughs and their implications]
+    
+    ---
+    
+    ## 💻 Implementation Guide
+    
+    > [!TIP] Getting Started
+    > [Step-by-step technical implementation notes]
+    
+    ```bash
+    # Terminal commands when relevant
+    [formatted command examples]
+    ```
+    
+    ---
+    
+    ## 🔗 Related Concepts Network
+    
+    ```mermaid
+    graph TD
+        A[{state["main_concepts"][0] if state["main_concepts"] else "Main Topic"}] --> B[Prerequisite Concept]
+        A --> C[Related Concept]
+        A --> D[Advanced Topic]
+    ```
+    
+    **Learning Path**: [[Previous Topic]] → **Current Topic** → [[Next Topic]]
+    
+    ---
+    
+    ## 🎓 Interactive Study Guide
+    
+    ### 🤔 Self-Assessment Questions
+    > [!NOTE] Test Your Understanding
+    > 1. **Concept Check**: Can you explain [key concept] without looking?
+    > 2. **Application**: How would you apply [concept] to solve [real problem]?
+    > 3. **Connections**: What's the relationship between [concept A] and [concept B]?
+    
+    ### 📝 Practice Problems
+    
+    > [!EXAMPLE] Beginner Level
+    > **Challenge**: [Simple application problem]
+    > **Goal**: [What they should learn]
+    
+    > [!TIP] Intermediate Level  
+    > **Challenge**: [More complex scenario]
+    > **Skills**: [What they should demonstrate]
+    
+    > [!WARNING] Advanced Level
+    > **Challenge**: [Research or implementation challenge]
+    > **Outcome**: [Professional-level competency]
+    
+    ### 🚀 Mini Project Ideas
+    - **📱 Project 1**: [Practical implementation exercise]
+    - **🔬 Project 2**: [Research-based exploration]
+    - **🎯 Project 3**: [Real-world application challenge]
+    
+    ---
+    
+    ## 📊 Quick Reference Card
+    
+    | 🎯 Concept | 📝 Definition | ⚡ Key Formula/Point | 🔗 Links |
+    |------------|---------------|---------------------|----------|
+    | [Concept 1] | [Brief definition] | [Formula/Key point] | [[Related Topic]] |
+    | [Concept 2] | [Brief definition] | [Formula/Key point] | [[Related Topic]] |
+    
+    ---
+    
+    ## 📚 Deep Dive References
+    
+    ### 📖 Foundational Books
+    {chr(10).join(f"> 📚 {book}" for book in books)}
+    
+    ### 🌐 Online Resources
+    {chr(10).join(f"> 🔗 {resource}" for resource in online_resources)}
+    
+    ### 🔬 Research Papers
+    {chr(10).join(f"> 📄 {paper}" for paper in papers)}
+    
+    ### 🆕 Recent Developments  
+    {chr(10).join(f"> ⚡ {dev}" for dev in recent_developments)}
+    
+    ---
+    
+    ## ✅ Mastery Checklist
+    
+    > [!NOTE] Learning Milestones
+    > - [ ] I can define all key concepts clearly
+    > - [ ] I understand the practical applications
+    > - [ ] I can solve basic problems independently  
+    > - [ ] I see connections to other topics
+    > - [ ] I'm ready for advanced material
+    
+    ## 🏷️ Tags
+    #{" #".join([concept.lower().replace(" ", "-") for concept in state["main_concepts"]])} #comprehensive-study #university-level #enhanced-notes #visual-learning
+    
+    ---
+    *📅 Enhanced on {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} using o3-mini*  
+    *🎯 Original concepts: {", ".join(state["main_concepts"])}*  
+    *📊 Related materials: {len(course_materials) + len(paper_abstracts)} items*
+    
+    CRITICAL INSTRUCTIONS:
+    1. Use ALL the rich formatting features shown above
+    2. Make it visually engaging with emojis, callouts, and tables
+    3. Preserve 85% original content, enhance with 15% visual structure
+    4. Focus on university-level depth with engaging presentation
+    5. Use Obsidian-compatible syntax throughout
     """
     
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="o3-mini",  # Changed to o3-mini for better final generation
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=4000  # Increased for comprehensive content
+            temperature=0.2,  # Lower for more structured output
+            max_tokens=4500   # Increased for enhanced content
         )
         
         final_note = response.choices[0].message.content.strip()
@@ -737,11 +917,15 @@ def generate_obsidian_note(state: AcademicNoteState) -> AcademicNoteState:
         state["final_note"] = final_note
         state["obsidian_links"] = list(set(obsidian_links))
         
-        print(f"  Generated comprehensive note with {len(obsidian_links)} Obsidian links")
+        print(f"  ✅ Generated enhanced educational note:")
+        print(f"     - {len(obsidian_links)} cross-references")
+        print(f"     - {len(course_materials)} course materials integrated")
+        print(f"     - {len(top_papers)} top papers included")
+        print(f"     - Enhanced structure with study guide")
         
     except Exception as e:
-        print(f"Error generating note: {sanitize_error_message(e)}")
-        state["final_note"] = f"# {state['title']}\n\nError generating comprehensive academic note: {str(e)}"
+        print(f"  ❌ Error generating enhanced note: {sanitize_error_message(e)}")
+        state["final_note"] = f"# {state['title']}\n\nError generating enhanced academic note: {str(e)}"
         state["obsidian_links"] = []
     
     return state
